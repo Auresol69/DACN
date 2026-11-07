@@ -79,7 +79,7 @@ public final class Individual implements Comparable<Individual> {
         this.activeLength = 0;
         this.totalDistance = 0.0;
         this.capacityPenalty = 0.0;
-        this.fitness = Double.MAX_VALUE;
+        this.fitness = 0.0;
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -98,7 +98,7 @@ public final class Individual implements Comparable<Individual> {
         this.activeLength = activeLength;
         this.totalDistance = 0.0;
         this.capacityPenalty = 0.0;
-        this.fitness = Double.MAX_VALUE;
+        this.fitness = 0.0;
     }
 
     /**
@@ -139,6 +139,7 @@ public final class Individual implements Comparable<Individual> {
     // Setters nội bộ – dùng bởi FitnessEvaluator và GaEngine
     // ─────────────────────────────────────────────────────────────────────────
 
+    public void setActiveLength(int activeLength)        { this.activeLength = activeLength; }
     public void setTotalDistance(double totalDistance)   { this.totalDistance = totalDistance; }
     public void setCapacityPenalty(double capacityPenalty){ this.capacityPenalty = capacityPenalty; }
     public void setFitness(double fitness)               { this.fitness = fitness; }

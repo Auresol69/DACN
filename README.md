@@ -95,6 +95,10 @@ GC Pauses = 0 ms  (zero heap allocation trong vòng lặp)
 
 ```
 src/main/java/com/example/demo/
+├── config/
+│   └── AsyncConfig.java             ← Cấu hình gaTaskExecutor (Thread pool riêng cho GA)
+├── controller/
+│   └── OptimizationController.java  ← REST API POST /api/v1/optimize/cvrp (Async CompletableFuture)
 ├── dto/
 │   ├── request/
 │   │   ├── GaConfig.java            ← Tham số GA (vehicleCapacity, maxVehicles, ...)
@@ -111,8 +115,19 @@ src/main/java/com/example/demo/
 │   ├── ProblemContext.java          ← costMatrix[][], demands[], vehicleCapacity
 │   └── DecodingResult.java          ← record(totalDistance, penalty, vehiclesUsed)
 └── service/
-    ├── DistanceMatrixService.java   ← Pre-compute O(N²): Haversine / Euclidean
-    └── SinglePassDecoder.java       ← Giải mã O(N) theo mục 2.2.2.1 tài liệu
+    ├── DistanceMatrixService.java   ← Pre-compute O(N²): Haversine / Euclidean (nint rounding)
+    ├── SinglePassDecoder.java       ← Giải mã O(N) theo mục 2.2.2.1 tài liệu
+    ├── GeneticOperators.java        ← Tournament Selection, Modified OX, Mutation (Swap/Shift/Inversion)
+    ├── GaOptimizationEngine.java    ← Master-Slave Parallel GA Engine, Dynamic Penalty, Time Budget
+    └── RouteBuilderService.java     ← Giải mã Individual thành danh sách RouteDetail response
+```
+
+```
+src/test/java/com/example/demo/
+└── service/
+    ├── SinglePassDecoderTest.java   ← Test tính khoảng cách, số xe, capacity penalty (8 tests)
+    ├── ModifiedOXCrossoverTest.java ← Test bảo toàn N customers, K+1 depots, no duplicates (25 tests)
+    └── GaTimeBudgetTest.java        ← Test ngắt time_budget_ms ~1s khi max_generations=1,000,000 (3 tests)
 ```
 
 ---
@@ -333,28 +348,52 @@ for gene in chromosome[0..L-1]:
         prevNode       = gene
 ```
 
-### 🔲 Giai đoạn 3 – GA Engine (Parallel Master-Slave) *(chưa triển khai)*
+### ✅ Giai đoạn 3 – Genetic Operators
 
-- `PopulationInitializer` – khởi tạo quần thể ngẫu nhiên hợp lệ
-- `TournamentSelector` – k-Tournament Selection
-- `OxCrossover` – Modified Order Crossover (OX)
-- `MutationOperator` – Swap / Relocate / Inversion
-- `GaEngine` – vòng lặp chính, FixedThreadPool, CountDownLatch
+| Toán tử | Phương thức | Chi tiết triển khai |
+|---|---|---|
+| **Selection** | `tournamentSelect()` | Binary Tournament ($k=2$), chọn cá thể có fitness cao hơn (Maximize $1/\text{cost}$) |
+| **Crossover** | `modifiedOX()` | Modified Order Crossover (OX) sao chép đoạn `[cut1..cut2]`, điền xoay vòng từ P2, bảo toàn đúng $N$ customers và $K+1$ số 0 |
+| **Mutation** | `mutate()` | Chọn ngẫu nhiên 1 trong 3: **Swap** (đổi chỗ 2 customer), **Relocate** (dời 1 customer), **Inversion** (đảo ngược đoạn `[i..j]` trong `[1..L-2]`) |
 
-### 🔲 Giai đoạn 4 – REST Controller & Async Processing *(chưa triển khai)*
+### ✅ Giai đoạn 4 – Parallel GA Optimization Engine
 
-- `OptimizationController` – `POST /api/v1/optimize/cvrp`
-- `AsyncOptimizationService` – xử lý bất đồng bộ
+| Thành phần | Phương thức | Chi tiết |
+|---|---|---|
+| **Population Initializer** | `initializePopulation()` | 70% ngẫu nhiên (Fisher-Yates) + 30% heuristic Nearest-Neighbor có nhiễu (perturbation) |
+| **Parallel Evaluation** | `evaluatePopulationParallel()` | Chia chunks trên `FixedThreadPool(N_CPU)`, gọi `SinglePassDecoder`, `costMatrix` read-only |
+| **Fitness Formulation** | Maximization | $\text{Fitness} = 1.0 / (\text{TotalDistance} + \alpha(t) \times \text{CapacityPenalty})$ (mục 2.4.1.3) |
+| **Dynamic Penalty** | `computeAlpha()` | $\alpha(t) = \alpha_0 \times (1 + t / T)^\gamma$ ($\alpha_0=100, \gamma=2$) |
+| **Generational Loop** | `runOptimization()` | Elitism ($E=1$), swap thế hệ zero-allocation, kiểm tra `time_budget_ms` dừng khẩn cấp |
 
-### 🔲 Giai đoạn 5 – VRP File Parser & Benchmarking *(chưa triển khai)*
+### ✅ Giai đoạn 5 – REST Controller & Async Processing
+
+| Thành phần | Endpoint / Class | Chi tiết |
+|---|---|---|
+| **Async Config** | `AsyncConfig` | Thread pool `gaTaskExecutor` riêng biệt (core: $N_{\text{CPU}}$, max: $2N_{\text{CPU}}$, queue: 50) |
+| **REST Controller** | `POST /api/v1/optimize/cvrp` | `@Async("gaTaskExecutor")`, `CompletableFuture`, non-blocking Tomcat I/O |
+| **Feasibility Pre-check** | `checkFeasibility()` | Kiểm tra sớm: $\sum \text{demand} \le K \times C_{\text{cap}}$, $K \ge 1$, $T_{\text{budget}} \ge 100\text{ms}$ |
+| **Route Builder** | `RouteBuilderService` | Giải mã `Individual` thành danh sách `RouteDetail` ($O(N)$) |
+
+### ✅ Giai đoạn 6 – Unit Testing (JUnit 5 + AssertJ)
+
+Bộ kiểm thử gồm **37 test cases** bao phủ toàn diện các luồng logic trọng yếu:
+
+| Test Suite | File | Số test | Kết quả | Mô tả kiểm thử |
+|---|---|---:|:---:|---|
+| **SinglePassDecoderTest** | `SinglePassDecoderTest.java` | 8 | ✅ PASS | Kiểm tra tính đúng quãng đường, nhận diện đúng 2 xe với `[0, 1, 2, 0, 3, 0]`, tuyến rỗng `[0, 0]`, và phạt vi phạm tải trọng chính xác |
+| **ModifiedOXCrossoverTest** | `ModifiedOXCrossoverTest.java` | 25 | ✅ PASS | Kiểm tra tính bảo toàn không mất customer, không trùng lặp, bảo toàn đúng $K+1$ số 0 depot, 20 lần ngẫu nhiên đa dạng điểm cắt |
+| **GaTimeBudgetTest** | `GaTimeBudgetTest.java` | 3 | ✅ PASS | Chạy với `max_generations = 1,000,000`, khẳng định engine dừng chuẩn xác sau $\sim 1000\text{ms}$ (vượt qua 20,552 thế hệ) và $\sim 500\text{ms}$ |
+| **DemoApplicationTests** | `DemoApplicationTests.java` | 1 | ✅ PASS | Spring Boot Context loading test |
+
+### 🔲 Giai đoạn 7 – VRP File Parser & Benchmarking Augerat (A) *(tiếp theo)*
 
 - `VrpFileParser` – đọc file `.vrp` / `.sol` từ CVRPLib
-- `BenchmarkService` – chạy tự động 27 instances, tính `%Gap`
+- `BenchmarkRunner` – chạy tự động 27 instances Augerat, đo thời gian thực thi và tính `%Gap` so với BKS
 
-### 🔲 Giai đoạn 6 – OR-Tools Integration & Comparison *(chưa triển khai)*
+### 🔲 Giai đoạn 8 – OR-Tools Baseline Integration *(tùy chọn)*
 
-- Tích hợp Google OR-Tools làm baseline đối sánh
-- Bảng so sánh: GA vs OR-Tools (chất lượng & thời gian)
+- Tích hợp Google OR-Tools làm baseline đối sánh theo tài liệu đề tài
 
 ---
 
@@ -368,18 +407,53 @@ for gene in chromosome[0..L-1]:
 ### Build & Run
 
 ```bash
-# Build
+# 1. Biên dịch mã nguồn
 ./mvnw compile
 
-# Test
+# 2. Chạy toàn bộ 37 Unit Tests
 ./mvnw test
 
-# Chạy ứng dụng
+# 3. Khởi chạy ứng dụng Spring Boot
 ./mvnw spring-boot:run
-
-# Swagger UI
-http://localhost:8080/swagger-ui/index.html
 ```
+
+### Kiểm thử API qua cURL
+
+Sau khi server khởi động (port 8080), có thể gửi request kiểm thử:
+
+```bash
+curl -X POST http://localhost:8080/api/v1/optimize/cvrp \
+  -H "Content-Type: application/json" \
+  -d '{
+    "batch_id": "TEST_001",
+    "config": {
+      "vehicle_capacity": 100.0,
+      "max_vehicles": 3,
+      "time_budget_ms": 1000,
+      "population_size": 100,
+      "max_generations": 500,
+      "crossover_rate": 0.85,
+      "mutation_rate": 0.10
+    },
+    "depot": {
+      "id": 0,
+      "latitude": 10.762622,
+      "longitude": 106.660172
+    },
+    "customers": [
+      { "id": 1, "demand": 19.0, "lat": 10.77123, "lng": 106.6721 },
+      { "id": 2, "demand": 30.0, "lat": 10.75412, "lng": 106.6412 },
+      { "id": 3, "demand": 16.0, "lat": 10.78119, "lng": 106.6915 },
+      { "id": 4, "demand": 25.0, "lat": 10.74100, "lng": 106.6500 },
+      { "id": 5, "demand": 10.0, "lat": 10.79000, "lng": 106.6800 }
+    ]
+  }'
+```
+
+### Swagger UI & OpenAPI Docs
+
+- **Swagger UI:** `http://localhost:8080/swagger-ui.html`
+- **OpenAPI JSON Spec:** `http://localhost:8080/api-docs`
 
 ### Cấu trúc thư mục dataset
 

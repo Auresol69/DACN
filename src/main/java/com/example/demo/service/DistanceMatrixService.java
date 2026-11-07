@@ -137,7 +137,9 @@ public class DistanceMatrixService {
             for (int j = i + 1; j <= N; j++) {
                 double dx = xs[i] - xs[j];
                 double dy = ys[i] - ys[j];
-                double dist = Math.sqrt(dx * dx + dy * dy);
+                // CVRPLib EUC_2D chuẩn: làm tròn đến số nguyên gần nhất (nint)
+                // Bắt buộc để kết quả khớp với BKS trong file .sol
+                double dist = Math.round(Math.sqrt(dx * dx + dy * dy));
                 costMatrix[i][j] = dist;
                 costMatrix[j][i] = dist;
             }

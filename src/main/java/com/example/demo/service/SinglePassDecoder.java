@@ -110,6 +110,16 @@ public class SinglePassDecoder {
             }
         }
 
+        // ── Xử lý chốt tuyến cuối nếu mảng không kết thúc bằng 0 ──────────────
+        if (prevNode != 0) {
+            routeDistance += costMatrix[prevNode][0];
+            totalDistance += routeDistance;
+            if (routeLoad > vehicleCapacity) {
+                totalCapacityPenalty += (routeLoad - vehicleCapacity);
+            }
+            vehiclesUsed++;
+        }
+
         return new DecodingResult(totalDistance, totalCapacityPenalty, vehiclesUsed);
     }
 
