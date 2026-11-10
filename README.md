@@ -95,10 +95,15 @@ GC Pauses = 0 ms  (zero heap allocation trong vòng lặp)
 
 ```
 src/main/java/com/example/demo/
+├── benchmark/
+│   ├── VrpInstance.java             ← Java record: instance data (xs, ys, demands, bks)
+│   ├── VrpFileParser.java           ← Parser .vrp + .sol (CVRPLib/TSPLIB95 format)
+│   └── BenchmarkRunner.java         ← Chạy tự động toàn bộ dataset, in bảng Markdown
 ├── config/
 │   └── AsyncConfig.java             ← Cấu hình gaTaskExecutor (Thread pool riêng cho GA)
 ├── controller/
-│   └── OptimizationController.java  ← REST API POST /api/v1/optimize/cvrp (Async CompletableFuture)
+│   ├── OptimizationController.java  ← REST API POST /api/v1/optimize/cvrp (Async CompletableFuture)
+│   └── BenchmarkController.java     ← REST API GET /api/v1/benchmark/run, POST /run-single
 ├── dto/
 │   ├── request/
 │   │   ├── GaConfig.java            ← Tham số GA (vehicleCapacity, maxVehicles, ...)
@@ -124,6 +129,8 @@ src/main/java/com/example/demo/
 
 ```
 src/test/java/com/example/demo/
+├── benchmark/
+│   └── VrpFileParserTest.java       ← Test parse A-n32-k5.vrp: N=31, K=5, BKS=784, coords (18 tests)
 └── service/
     ├── SinglePassDecoderTest.java   ← Test tính khoảng cách, số xe, capacity penalty (8 tests)
     ├── ModifiedOXCrossoverTest.java ← Test bảo toàn N customers, K+1 depots, no duplicates (25 tests)
@@ -386,10 +393,80 @@ Bộ kiểm thử gồm **37 test cases** bao phủ toàn diện các luồng lo
 | **GaTimeBudgetTest** | `GaTimeBudgetTest.java` | 3 | ✅ PASS | Chạy với `max_generations = 1,000,000`, khẳng định engine dừng chuẩn xác sau $\sim 1000\text{ms}$ (vượt qua 20,552 thế hệ) và $\sim 500\text{ms}$ |
 | **DemoApplicationTests** | `DemoApplicationTests.java` | 1 | ✅ PASS | Spring Boot Context loading test |
 
-### 🔲 Giai đoạn 7 – VRP File Parser & Benchmarking Augerat (A) *(tiếp theo)*
+### ✅ Giai đoạn 7 – VRP File Parser & Benchmarking Augerat (A)
 
-- `VrpFileParser` – đọc file `.vrp` / `.sol` từ CVRPLib
-- `BenchmarkRunner` – chạy tự động 27 instances Augerat, đo thời gian thực thi và tính `%Gap` so với BKS
+#### Các file mới
+
+| Class | Package | Mô tả |
+|---|---|---|
+| `VrpInstance` | `benchmark/` | Java record chứa toàn bộ dữ liệu một instance: `numCustomers`, `maxVehicles`, `capacity`, `xs[]`, `ys[]`, `demands[]`, `bks` |
+| `VrpFileParser` | `benchmark/` | `@Service` parse file `.vrp` (sections: `NODE_COORD`, `DEMAND`, `DEPOT`) và `.sol` (đọc dòng `Cost XXX` → BKS) |
+| `BenchmarkRunner` | `benchmark/` | `@Service` tự động chạy GA trên toàn bộ `.vrp` files trong thư mục, build ma trận Euclidean (nint rounding – khớp CVRPLib), in bảng Markdown |
+| `BenchmarkController` | `controller/` | `@RestController` cung cấp `GET /api/v1/benchmark/run` và `POST /api/v1/benchmark/run-single` |
+
+#### Quy ước ánh xạ chỉ số (CVRPLib → System)
+
+```
+VRP file node 1          → depot   → systemIndex 0
+VRP file node i (i ≥ 2)  → customer → systemIndex i-1
+```
+
+#### Tham số GA mặc định cho benchmark
+
+| Tham số | Giá trị |
+|---|---|
+| `populationSize` | 200 |
+| `maxGenerations` | 1,000,000 *(giới hạn bởi `timeBudgetMs`)* |
+| `timeBudgetMs` | 3,000 ms (3 giây / instance) |
+| `crossoverRate` | 0.85 |
+| `mutationRate` | 0.10 |
+
+#### API Benchmark
+
+| Endpoint | Method | Mô tả |
+|---|---|---|
+| `/api/v1/benchmark/run` | `GET` | Chạy toàn bộ 27 instances trong thư mục mặc định (`benchmark.dataset.dir`). Bất đồng bộ. |
+| `/api/v1/benchmark/run-single` | `POST` | Chạy 1 instance cụ thể. Parameter: `vrpFilePath` (đường dẫn tuyệt đối đến `.vrp`) |
+
+```bash
+# Chạy benchmark đơn lẻ
+curl -X POST "http://localhost:8080/api/v1/benchmark/run-single?vrpFilePath=E:/dacn/demo/A/A-n32-k5.vrp"
+
+# Chạy toàn bộ dataset Augerat A
+curl "http://localhost:8080/api/v1/benchmark/run?dir=E:/dacn/demo/A"
+```
+
+#### Unit Test – VrpFileParser (18 tests)
+
+| Test | Mô tả |
+|---|---|
+| `test_instanceName` | Tên instance = `A-n32-k5` |
+| `test_numCustomers` | N = 31 (`DIMENSION-1`) |
+| `test_maxVehicles` | K = 5 (trích từ tên file) |
+| `test_capacity` | Capacity = 100.0 |
+| `test_bks` | BKS = 784 (đọc từ `.sol`) |
+| `test_xsLength / ysLength / demandsLength` | Array length = 32 (1 depot + 31 khách hàng) |
+| `test_depotX / depotY` | xs[0]=82, ys[0]=76 |
+| `test_depotDemand` | demands[0]=0 |
+| `test_customer1X / Y / Demand` | xs[1]=96, ys[1]=44, demands[1]=19 |
+| `test_chromosomeLength` | L = N+K+1 = 37 |
+| `test_parseBks` | Direct parseBks() = 784 |
+| `test_depotXHelper / depotYHelper` | Helper methods |
+
+#### Bộ kiểm thử tổng thể sau Giai đoạn 7
+
+```
+Tests run: 55, Failures: 0, Errors: 0, Skipped: 0  ✅ BUILD SUCCESS
+```
+
+| Test Suite | Tests | Status |
+|---|---:|:---:|
+| `VrpFileParserTest` | 18 | ✅ PASS |
+| `ModifiedOXCrossoverTest` | 25 | ✅ PASS |
+| `GaTimeBudgetTest` | 3 | ✅ PASS |
+| `SinglePassDecoderTest` | 8 | ✅ PASS |
+| `DemoApplicationTests` | 1 | ✅ PASS |
+| **Tổng** | **55** | ✅ |
 
 ### 🔲 Giai đoạn 8 – OR-Tools Baseline Integration *(tùy chọn)*
 
@@ -410,7 +487,7 @@ Bộ kiểm thử gồm **37 test cases** bao phủ toàn diện các luồng lo
 # 1. Biên dịch mã nguồn
 ./mvnw compile
 
-# 2. Chạy toàn bộ 37 Unit Tests
+# 2. Chạy toàn bộ 55 Unit Tests
 ./mvnw test
 
 # 3. Khởi chạy ứng dụng Spring Boot
