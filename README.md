@@ -98,12 +98,14 @@ src/main/java/com/example/demo/
 ├── benchmark/
 │   ├── VrpInstance.java             ← Java record: instance data (xs, ys, demands, bks)
 │   ├── VrpFileParser.java           ← Parser .vrp + .sol (CVRPLib/TSPLIB95 format)
-│   └── BenchmarkRunner.java         ← Chạy tự động toàn bộ dataset, in bảng Markdown
+│   ├── BenchmarkRunner.java         ← Chạy tự động toàn bộ dataset, in bảng Markdown
+│   ├── BenchmarkComparisonResult.java ← Record lưu trữ kết quả đối sánh GA vs OR-Tools
+│   └── BenchmarkComparisonRunner.java ← Runner đối sánh GA vs Google OR-Tools trên dataset
 ├── config/
-│   └── AsyncConfig.java             ← Cấu hình gaTaskExecutor (Thread pool riêng cho GA)
+│   └── AsyncConfig.java             ← Cấu hình gaTaskExecutor (Thread pool riêng cho GA & Solver)
 ├── controller/
-│   ├── OptimizationController.java  ← REST API POST /api/v1/optimize/cvrp (Async CompletableFuture)
-│   └── BenchmarkController.java     ← REST API GET /api/v1/benchmark/run, POST /run-single
+│   ├── OptimizationController.java  ← REST API POST /optimize/cvrp, /ortools, /compare
+│   └── BenchmarkController.java     ← REST API GET /run, POST /run-single, GET /compare, POST /compare-single
 ├── dto/
 │   ├── request/
 │   │   ├── GaConfig.java            ← Tham số GA (vehicleCapacity, maxVehicles, ...)
@@ -113,28 +115,34 @@ src/main/java/com/example/demo/
 │   └── response/
 │       ├── SolutionSummary.java     ← Tổng quãng đường, số xe, %Gap vs BKS
 │       ├── RouteDetail.java         ← Chi tiết từng tuyến xe
-│       └── OptimizationResponse.java← DTO đầu ra chính
+│       ├── OptimizationResponse.java← DTO đầu ra chính
+│       ├── ComparisonMetrics.java   ← Bảng chỉ số đối sánh (DistanceDiff, Gap%, Speedup, Winner)
+│       └── ComparisonResponse.java  ← DTO đầu ra của endpoint đối sánh
 ├── model/
 │   ├── Individual.java              ← Nhiễm sắc thể GA + Object Pool API
 │   ├── IndividualPool.java          ← Pre-allocated LIFO pool (ArrayDeque)
 │   ├── ProblemContext.java          ← costMatrix[][], demands[], vehicleCapacity
-│   └── DecodingResult.java          ← record(totalDistance, penalty, vehiclesUsed)
+│   ├── DecodingResult.java          ← record(totalDistance, penalty, vehiclesUsed)
+│   └── OrToolsSolution.java         ← record(totalDistance, vehiclesUsed, executionTimeMs, status, routes)
 └── service/
     ├── DistanceMatrixService.java   ← Pre-compute O(N²): Haversine / Euclidean (nint rounding)
     ├── SinglePassDecoder.java       ← Giải mã O(N) theo mục 2.2.2.1 tài liệu
     ├── GeneticOperators.java        ← Tournament Selection, Modified OX, Mutation (Swap/Shift/Inversion)
     ├── GaOptimizationEngine.java    ← Master-Slave Parallel GA Engine, Dynamic Penalty, Time Budget
+    ├── OrToolsSolverService.java    ← Google OR-Tools CP-SAT Routing Engine (Baseline Solver)
     └── RouteBuilderService.java     ← Giải mã Individual thành danh sách RouteDetail response
 ```
 
 ```
 src/test/java/com/example/demo/
 ├── benchmark/
-│   └── VrpFileParserTest.java       ← Test parse A-n32-k5.vrp: N=31, K=5, BKS=784, coords (18 tests)
+│   ├── VrpFileParserTest.java       ← Test parse A-n32-k5.vrp: N=31, K=5, BKS=784, coords (18 tests)
+│   └── BenchmarkComparisonTest.java ← Test đối sánh GA vs OR-Tools trên A-n32-k5 (2 tests)
 └── service/
     ├── SinglePassDecoderTest.java   ← Test tính khoảng cách, số xe, capacity penalty (8 tests)
     ├── ModifiedOXCrossoverTest.java ← Test bảo toàn N customers, K+1 depots, no duplicates (25 tests)
-    └── GaTimeBudgetTest.java        ← Test ngắt time_budget_ms ~1s khi max_generations=1,000,000 (3 tests)
+    ├── GaTimeBudgetTest.java        ← Test ngắt time_budget_ms ~1s khi max_generations=1,000,000 (3 tests)
+    └── OrToolsSolverServiceTest.java← Test giải CVRP nhỏ, quá tải, GPS DTO, và A-n32-k5 BKS=784 (4 tests)
 ```
 
 ---
@@ -468,9 +476,77 @@ Tests run: 55, Failures: 0, Errors: 0, Skipped: 0  ✅ BUILD SUCCESS
 | `DemoApplicationTests` | 1 | ✅ PASS |
 | **Tổng** | **55** | ✅ |
 
-### 🔲 Giai đoạn 8 – OR-Tools Baseline Integration *(tùy chọn)*
+### ✅ Giai đoạn 8 – OR-Tools Baseline Integration & Đối sánh
 
-- Tích hợp Google OR-Tools làm baseline đối sánh theo tài liệu đề tài
+Tích hợp **Google OR-Tools** (Constraint Programming - Routing Solver) làm chuẩn đối sánh (Baseline) theo đúng định hướng đề tài (Chương 1 & Chương 3).
+
+#### Các thành phần mới
+
+| Class | Package | Vai trò |
+|---|---|---|
+| `OrToolsSolution` | `model/` | Record kết quả giải của OR-Tools (`totalDistance`, `vehiclesUsed`, `executionTimeMs`, `status`, `routes`) |
+| `OrToolsSolverService` | `service/` | Lõi giải bài toán CVRP bằng Google OR-Tools Java API (`RoutingIndexManager`, `RoutingModel`, `Capacity` dimension, `PATH_CHEAPEST_ARC`, `GUIDED_LOCAL_SEARCH`) |
+| `ComparisonMetrics` | `dto/response/` | Bảng chỉ số đối sánh định lượng (`distanceDiff`, `gapPercent`, `speedup`, `winner`, `recommendation`) |
+| `ComparisonResponse` | `dto/response/` | DTO đầu ra của endpoint đối sánh hai thuật toán |
+| `BenchmarkComparisonResult` | `benchmark/` | Record lưu trữ kết quả chạy đối sánh trên từng instance CVRPLib |
+| `BenchmarkComparisonRunner` | `benchmark/` | Runner tự động thực thi cả GA và OR-Tools trên dataset, tính toán chênh lệch, in bảng so sánh ASCII/Markdown |
+
+#### Các API Endpoint mới
+
+| Endpoint | Method | Mô tả |
+|---|---|---|
+| `/api/v1/optimize/ortools` | `POST` | Tối ưu hóa đơn hàng bằng Google OR-Tools CP-SAT |
+| `/api/v1/optimize/compare` | `POST` | Chạy song song cả GA và OR-Tools, trả về đối sánh chi tiết cùng khuyến nghị |
+| `/api/v1/benchmark/compare` | `GET` | Chạy đối sánh GA vs OR-Tools trên toàn bộ 27 instances Augerat A |
+| `/api/v1/benchmark/compare-single` | `POST` | Chạy đối sánh GA vs OR-Tools cho một file `.vrp` cụ thể |
+
+#### Ví dụ gọi API Đối sánh (cURL)
+
+```bash
+# 1. Đối sánh GA vs OR-Tools trên một lô đơn hàng thực tế
+curl -X POST http://localhost:8080/api/v1/optimize/compare \
+  -H "Content-Type: application/json" \
+  -d '{
+    "batch_id": "COMPARE_001",
+    "config": {
+      "vehicle_capacity": 100.0,
+      "max_vehicles": 3,
+      "time_budget_ms": 2000,
+      "population_size": 200,
+      "max_generations": 500,
+      "crossover_rate": 0.85,
+      "mutation_rate": 0.10
+    },
+    "depot": { "id": 0, "latitude": 10.762622, "longitude": 106.660172 },
+    "customers": [
+      { "id": 1, "demand": 19.0, "lat": 10.77123, "lng": 106.6721 },
+      { "id": 2, "demand": 30.0, "lat": 10.75412, "lng": 106.6412 },
+      { "id": 3, "demand": 16.0, "lat": 10.78119, "lng": 106.6915 },
+      { "id": 4, "demand": 25.0, "lat": 10.74100, "lng": 106.6500 },
+      { "id": 5, "demand": 10.0, "lat": 10.79000, "lng": 106.6800 }
+    ]
+  }'
+
+# 2. Đối sánh trên instance Augerat A-n32-k5
+curl -X POST "http://localhost:8080/api/v1/benchmark/compare-single?vrpFilePath=E:/dacn/demo/A/A-n32-k5.vrp&timeBudgetMs=3000"
+```
+
+#### Bộ kiểm thử tổng thể (61 Unit Tests)
+
+```
+Tests run: 61, Failures: 0, Errors: 0, Skipped: 0  ✅ BUILD SUCCESS
+```
+
+| Test Suite | Tests | Status | Mô tả |
+|---|---:|:---:|---|
+| `OrToolsSolverServiceTest` | 4 | ✅ PASS | Nghiệm bài toán nhỏ hợp lệ, từ chối quá tải, giải GPS DTO, và đạt BKS 784 trên A-n32-k5 |
+| `BenchmarkComparisonTest` | 2 | ✅ PASS | Đối sánh GA vs OR-Tools trên A-n32-k5, kiểm tra xử lý lỗi file |
+| `VrpFileParserTest` | 18 | ✅ PASS | Parse dữ liệu CVRPLib .vrp & .sol |
+| `ModifiedOXCrossoverTest` | 25 | ✅ PASS | Bảo toàn khách hàng và vách ngăn depot |
+| `GaTimeBudgetTest` | 3 | ✅ PASS | Ngắt theo ngân sách thời gian 1s và 500ms |
+| `SinglePassDecoderTest` | 8 | ✅ PASS | Giải mã O(N), phạt quá tải |
+| `DemoApplicationTests` | 1 | ✅ PASS | Spring Boot Context loading |
+| **Tổng cộng** | **61** | ✅ | **Toàn bộ 8 giai đoạn hoàn tất 100%** |
 
 ---
 
@@ -487,7 +563,7 @@ Tests run: 55, Failures: 0, Errors: 0, Skipped: 0  ✅ BUILD SUCCESS
 # 1. Biên dịch mã nguồn
 ./mvnw compile
 
-# 2. Chạy toàn bộ 55 Unit Tests
+# 2. Chạy toàn bộ 61 Unit Tests
 ./mvnw test
 
 # 3. Khởi chạy ứng dụng Spring Boot

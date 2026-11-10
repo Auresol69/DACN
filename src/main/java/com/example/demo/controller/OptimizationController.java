@@ -2,13 +2,13 @@ package com.example.demo.controller;
 
 import com.example.demo.dto.request.GaConfig;
 import com.example.demo.dto.request.OptimizationRequest;
-import com.example.demo.dto.response.OptimizationResponse;
-import com.example.demo.dto.response.RouteDetail;
-import com.example.demo.dto.response.SolutionSummary;
+import com.example.demo.dto.response.*;
 import com.example.demo.model.Individual;
+import com.example.demo.model.OrToolsSolution;
 import com.example.demo.model.ProblemContext;
 import com.example.demo.service.DistanceMatrixService;
 import com.example.demo.service.GaOptimizationEngine;
+import com.example.demo.service.OrToolsSolverService;
 import com.example.demo.service.RouteBuilderService;
 import jakarta.validation.Valid;
 import org.slf4j.Logger;
@@ -47,13 +47,16 @@ public class OptimizationController {
     private final DistanceMatrixService distanceMatrixService;
     private final GaOptimizationEngine  gaEngine;
     private final RouteBuilderService   routeBuilder;
+    private final OrToolsSolverService  orToolsSolver;
 
     public OptimizationController(DistanceMatrixService distanceMatrixService,
                                    GaOptimizationEngine gaEngine,
-                                   RouteBuilderService routeBuilder) {
+                                   RouteBuilderService routeBuilder,
+                                   OrToolsSolverService orToolsSolver) {
         this.distanceMatrixService = distanceMatrixService;
         this.gaEngine              = gaEngine;
         this.routeBuilder          = routeBuilder;
+        this.orToolsSolver         = orToolsSolver;
     }
 
     // =========================================================================
@@ -138,6 +141,147 @@ public class OptimizationController {
                                     .executionTimeMs(System.currentTimeMillis() - startTimeMs)
                                     .build()
                     )
+            );
+        }
+    }
+
+    // =========================================================================
+    // POST /api/v1/optimize/ortools
+    // =========================================================================
+
+    /**
+     * Tối ưu hóa CVRP bằng Google OR-Tools CP-SAT Routing Engine (Baseline).
+     */
+    @PostMapping("/ortools")
+    @Async("gaTaskExecutor")
+    public CompletableFuture<ResponseEntity<OptimizationResponse>> optimizeOrTools(
+            @Valid @RequestBody OptimizationRequest request) {
+
+        final String batchId = request.getBatchId();
+        log.info("[OR-Tools][{}] Nhận request: N={} customers, K={} vehicles",
+                batchId, request.getCustomers().size(), request.getConfig().getMaxVehicles());
+
+        OptimizationResponse response = orToolsSolver.solve(request);
+        return CompletableFuture.completedFuture(ResponseEntity.ok(response));
+    }
+
+    // =========================================================================
+    // POST /api/v1/optimize/compare
+    // =========================================================================
+
+    /**
+     * Giải song song bằng cả Thuật toán Di truyền (GA) và Google OR-Tools,
+     * trả về phân tích đối sánh chi tiết về khoảng cách, thời gian và số xe.
+     */
+    @PostMapping("/compare")
+    @Async("gaTaskExecutor")
+    public CompletableFuture<ResponseEntity<ComparisonResponse>> compareAlgorithms(
+            @Valid @RequestBody OptimizationRequest request) {
+
+        final String batchId   = request.getBatchId();
+        final GaConfig config  = request.getConfig();
+        final long startTimeMs = System.currentTimeMillis();
+
+        log.info("[COMPARE][{}] Bắt đầu đối sánh GA vs OR-Tools (timeBudget={}ms)",
+                batchId, config.getTimeBudgetMs());
+
+        String feasibilityError = checkFeasibility(request);
+        if (feasibilityError != null) {
+            log.warn("[COMPARE][{}] INFEASIBLE: {}", batchId, feasibilityError);
+            OptimizationResponse infeasibleResp = OptimizationResponse.builder()
+                    .batchId(batchId)
+                    .status("INFEASIBLE")
+                    .executionTimeMs(System.currentTimeMillis() - startTimeMs)
+                    .build();
+
+            ComparisonResponse errorResponse = ComparisonResponse.builder()
+                    .batchId(batchId)
+                    .gaSolution(infeasibleResp)
+                    .orToolsSolution(infeasibleResp)
+                    .metrics(ComparisonMetrics.builder()
+                            .winner("NONE")
+                            .recommendation("Bài toán không khả thi: " + feasibilityError)
+                            .build())
+                    .build();
+            return CompletableFuture.completedFuture(ResponseEntity.badRequest().body(errorResponse));
+        }
+
+        try {
+            // Build chung ProblemContext
+            ProblemContext ctx = distanceMatrixService.build(request);
+
+            // 1. Chạy GA
+            long gaStart = System.currentTimeMillis();
+            Individual gaBest = gaEngine.runOptimization(ctx, config);
+            long gaTime = System.currentTimeMillis() - gaStart;
+            OptimizationResponse gaResponse = buildResponse(batchId, gaBest, ctx, gaTime);
+
+            // 2. Chạy OR-Tools
+            OrToolsSolution ortSol = orToolsSolver.solve(ctx, config.getTimeBudgetMs());
+            SolutionSummary ortSummary = SolutionSummary.builder()
+                    .totalDistanceKm(ortSol.totalDistance())
+                    .vehiclesUsed(ortSol.vehiclesUsed())
+                    .gapToBksPercent(-1.0)
+                    .build();
+            OptimizationResponse ortResponse = OptimizationResponse.builder()
+                    .batchId(batchId)
+                    .status(ortSol.status())
+                    .executionTimeMs(ortSol.executionTimeMs())
+                    .summary(ortSummary)
+                    .routes(ortSol.routes())
+                    .build();
+
+            // 3. Tính toán các chỉ số so sánh
+            double gaDist  = gaResponse.getSummary().getTotalDistanceKm();
+            double ortDist = ortSol.totalDistance();
+            double diffDist = gaDist - ortDist;
+            double gapPct   = ortDist > 0 ? (diffDist / ortDist) * 100.0 : 0.0;
+            long   diffTime = gaTime - ortSol.executionTimeMs();
+            double speedup  = gaTime > 0 ? (double) ortSol.executionTimeMs() / gaTime : 1.0;
+
+            String winner;
+            String rec;
+            if (gaDist < ortDist) {
+                winner = "GA";
+                rec = String.format("GA tìm được quãng đường ngắn hơn %.2f km (%+.2f%%) so với OR-Tools.",
+                        Math.abs(diffDist), gapPct);
+            } else if (ortDist < gaDist) {
+                winner = "OR-TOOLS";
+                rec = String.format("Google OR-Tools tìm được quãng đường ngắn hơn %.2f km (%+.2f%%) so với GA.",
+                        Math.abs(diffDist), -gapPct);
+            } else {
+                winner = "TIE";
+                rec = "Cả hai thuật toán đạt cùng chất lượng quãng đường.";
+            }
+
+            ComparisonMetrics metrics = ComparisonMetrics.builder()
+                    .gaDistance(gaDist)
+                    .orToolsDistance(ortDist)
+                    .distanceDiff(diffDist)
+                    .distanceGapPercent(gapPct)
+                    .gaExecutionTimeMs(gaTime)
+                    .orToolsExecutionTimeMs(ortSol.executionTimeMs())
+                    .timeDiffMs(diffTime)
+                    .speedup(speedup)
+                    .gaVehicles(gaResponse.getSummary().getVehiclesUsed())
+                    .orToolsVehicles(ortSol.vehiclesUsed())
+                    .winner(winner)
+                    .recommendation(rec)
+                    .build();
+
+            ComparisonResponse response = ComparisonResponse.builder()
+                    .batchId(batchId)
+                    .metrics(metrics)
+                    .gaSolution(gaResponse)
+                    .orToolsSolution(ortResponse)
+                    .build();
+
+            return CompletableFuture.completedFuture(ResponseEntity.ok(response));
+
+        } catch (Exception e) {
+            log.error("[COMPARE][{}] Lỗi thực thi đối sánh", batchId, e);
+            return CompletableFuture.completedFuture(
+                    ResponseEntity.internalServerError().build()
             );
         }
     }
