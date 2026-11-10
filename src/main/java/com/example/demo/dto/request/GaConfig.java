@@ -1,7 +1,12 @@
 package com.example.demo.dto.request;
 
+import com.fasterxml.jackson.annotation.JsonAlias;
+import io.swagger.v3.oas.annotations.media.Schema;
+import jakarta.validation.constraints.DecimalMax;
+import jakarta.validation.constraints.DecimalMin;
 import jakarta.validation.constraints.Max;
 import jakarta.validation.constraints.Min;
+import jakarta.validation.constraints.NotNull;
 import jakarta.validation.constraints.Positive;
 import lombok.AllArgsConstructor;
 import lombok.Builder;
@@ -10,20 +15,6 @@ import lombok.NoArgsConstructor;
 
 /**
  * Cấu hình tham số cho Thuật toán Di truyền (GA).
- * Mỗi trường được validate chặt chẽ để đảm bảo GA hội tụ ổn định.
- *
- * <p>Tương ứng với JSON schema mục 2.4.3.1 trong tài liệu:</p>
- * <pre>
- * "config": {
- *   "vehicle_capacity": 100.0,
- *   "max_vehicles": 5,
- *   "time_budget_ms": 3000,
- *   "population_size": 200,
- *   "max_generations": 500,
- *   "crossover_rate": 0.85,
- *   "mutation_rate": 0.10
- * }
- * </pre>
  */
 @Data
 @Builder
@@ -33,57 +24,68 @@ public class GaConfig {
 
     /**
      * Sức chứa tối đa của mỗi xe (C_cap).
-     * Dùng làm ràng buộc cứng khi giải mã nhiễm sắc thể.
-     * Kiểu double để tương thích với CVRPLib (ví dụ: sức chứa tính theo kg/thể tích).
      */
+    @NotNull(message = "Sức chứa xe không được để trống")
     @Positive(message = "Sức chứa xe phải là số dương")
-    private double vehicleCapacity;
+    @JsonAlias({"vehicle_capacity", "vehicleCapacity"})
+    @Schema(description = "Sức chứa tối đa của mỗi xe", example = "100.0")
+    private Double vehicleCapacity;
 
     /**
      * Số lượng xe tối đa có sẵn trong đội xe (K).
-     * Ảnh hưởng trực tiếp đến kích thước chromosome: L = N + K + 1.
      */
+    @NotNull(message = "Số xe tối đa không được để trống")
     @Positive(message = "Số xe tối đa phải là số dương")
     @Max(value = 200, message = "Số xe tối đa là 200")
-    private int maxVehicles;
+    @JsonAlias({"max_vehicles", "maxVehicles"})
+    @Schema(description = "Số lượng xe tối đa trong đội", example = "5")
+    private Integer maxVehicles;
 
     /**
      * Ngân sách thời gian tối đa cho một lần tối ưu hóa (ms).
-     * GA sẽ dừng sớm nếu vượt quá giới hạn này, trả về kết quả tốt nhất hiện tại.
-     * Mục tiêu: timeBudgetMs < 3000 ms (3 giây) theo yêu cầu Batching Window.
      */
+    @NotNull(message = "Ngân sách thời gian không được để trống")
     @Positive(message = "Ngân sách thời gian phải là số dương")
-    private long timeBudgetMs;
+    @JsonAlias({"time_budget_ms", "timeBudgetMs"})
+    @Schema(description = "Ngân sách thời gian chạy (ms)", example = "3000")
+    private Long timeBudgetMs;
 
     /**
-     * Kích thước quần thể: số lượng cá thể (nhiễm sắc thể) trong mỗi thế hệ.
-     * Giá trị điển hình từ tài liệu: 200. Quá nhỏ → hội tụ sớm; quá lớn → chậm.
+     * Kích thước quần thể: số lượng cá thể trong mỗi thế hệ.
      */
+    @NotNull(message = "Kích thước quần thể không được để trống")
     @Min(value = 10, message = "Kích thước quần thể tối thiểu là 10")
     @Max(value = 1000, message = "Kích thước quần thể tối đa là 1000")
-    private int populationSize;
+    @JsonAlias({"population_size", "populationSize"})
+    @Schema(description = "Kích thước quần thể GA", example = "200")
+    private Integer populationSize;
 
     /**
      * Số thế hệ tối đa GA sẽ chạy.
-     * Giá trị điển hình từ tài liệu: 500.
-     * Là điều kiện dừng thứ hai sau timeBudgetMs.
      */
+    @NotNull(message = "Số thế hệ không được để trống")
     @Positive(message = "Số thế hệ phải là số dương")
-    private int maxGenerations;
+    @JsonAlias({"max_generations", "maxGenerations"})
+    @Schema(description = "Số thế hệ tối đa", example = "500")
+    private Integer maxGenerations;
 
     /**
      * Xác suất lai ghép (crossover). Giá trị trong khoảng [0.0, 1.0].
-     * Giá trị điển hình từ tài liệu: 0.85 (p_c = 0.8 – 0.9).
      */
-    @Min(value = 0, message = "Tỷ lệ lai ghép không được âm")
-    @Max(value = 1, message = "Tỷ lệ lai ghép không được vượt quá 1.0")
-    private double crossoverRate;
+    @NotNull(message = "Tỷ lệ lai ghép không được để trống")
+    @DecimalMin(value = "0.0", message = "Tỷ lệ lai ghép không được âm")
+    @DecimalMax(value = "1.0", message = "Tỷ lệ lai ghép không được vượt quá 1.0")
+    @JsonAlias({"crossover_rate", "crossoverRate"})
+    @Schema(description = "Tỷ lệ lai ghép (0.0 - 1.0)", example = "0.85")
+    private Double crossoverRate;
 
     /**
      * Xác suất đột biến (mutation). Giá trị trong khoảng [0.0, 1.0].
-     * Giá trị điển hình từ tài liệu: 0.10 (p_m = 0.05 – 0.15).
      */
-    @Min(value = 0, message = "Tỷ lệ đột biến không được âm")
-    @Max(value = 1, message = "Tỷ lệ đột biến không được vượt quá 1.0")
-    private double mutationRate;
+    @NotNull(message = "Tỷ lệ đột biến không được để trống")
+    @DecimalMin(value = "0.0", message = "Tỷ lệ đột biến không được âm")
+    @DecimalMax(value = "1.0", message = "Tỷ lệ đột biến không được vượt quá 1.0")
+    @JsonAlias({"mutation_rate", "mutationRate"})
+    @Schema(description = "Tỷ lệ đột biến (0.0 - 1.0)", example = "0.10")
+    private Double mutationRate;
 }
