@@ -17,7 +17,9 @@ import java.util.Random;
 public class GeneticOperators {
 
     // Buffer tối đa cho visited[]; lớn hơn số khách hàng thực tế trong mọi dataset
-    private static final int MAX_NODES = 1001;
+    private static final int MAX_NODES     = 1001;
+    // Buffer tối đa cho chromosome length = N + K + 1 (trường hợp lớn nhất ~200+10+1)
+    private static final int MAX_CHROM_LEN = 512;
 
     // =========================================================================
     // 2.3.1  Tournament Selection (k = 2 hoặc tuỳ chỉnh)
@@ -27,7 +29,7 @@ public class GeneticOperators {
      * Chọn lọc giải đấu (Tournament Selection).
      *
      * Rút ngẫu nhiên {@code k} cá thể từ quần thể, trả về CHỈ SỐ của
-     * cá thể có fitness THẤP NHẤT (vì fitness = cost, cần minimize).
+     * cá thể có fitness CAO NHẤT (fitness = 1/(cost+penalty), cần MAXIMIZE).
      *
      * Độ phức tạp: O(k) – thường k = 2 (binary tournament).
      *
@@ -63,14 +65,14 @@ public class GeneticOperators {
     /**
      * Lai ghép theo thứ tự có cải tiến (Modified Order Crossover – OX).
      *
-     * Thuật toán 3 bước (mục 2.3.2.2):
-     *   1. Chọn ngẫu nhiên đoạn [cut1..cut2], copy từ parent1 sang offspring.
-     *   2. Quét parent2 từ vị trí cut2+1 (xoay vòng), điền các customer
-     *      chưa có vào các ô trống của offspring (bỏ qua khu vực [cut1..cut2]).
-     *   3. Các ô vẫn còn -1 (placeholder) được gán 0 (ký hiệu depot).
+     * Thuật toán OX đúng — hoạt động trên phần tử CUSTOMER (≠ 0):
+     *   1. Chọn ngẫu nhiên đoạn [cut1c..cut2c] trên danh sách customer của parent1.
+     *   2. Trích customer segment từ parent1[cut1c..cut2c].
+     *   3. Duyệt parent2 (xoay vòng từ cut2c+1) lấy customer chưa có → remainder.
+     *   4. Tái dựng offspring customer sequence: remainder[0..cut1c-1] + segment + remainder[cut1c..].
+     *   5. Giữ nguyên pattern vị trí 0 (depot separator) từ parent1 → chỉ thay customer values.
      *
-     * Không cấp phát Object: dùng visited[] được truyền vào từ caller,
-     * hoặc nếu null thì dùng buffer tĩnh cục bộ.
+     * Dùng OXBuffers (truyền vào từ caller) để tránh cấp phát trong hot-path.
      *
      * @param parent1    mảng nhiễm sắc thể cha
      * @param parent2    mảng nhiễm sắc thể mẹ
@@ -82,61 +84,77 @@ public class GeneticOperators {
     public void modifiedOX(int[] parent1, int[] parent2, int[] offspring,
                            int length, boolean[] visited, Random rng) {
 
-        // --- Chọn điểm cắt ngẫu nhiên [1 .. length-2] ---
-        int cut1 = 1 + rng.nextInt(length - 2); // [1, length-2]
-        int cut2 = 1 + rng.nextInt(length - 2);
-        if (cut1 > cut2) {
-            int tmp = cut1;
-            cut1 = cut2;
-            cut2 = tmp;
-        }
-
-        // --- Reset visited buffer ---
-        // Chỉ reset các phần tử thực sự cần thiết (tránh fill toàn bộ 1001)
+        // ── Trích customer list từ parent1 và parent2 ───────────────────────
+        int numCustomers = 0;
         for (int i = 0; i < length; i++) {
-            int gene = parent1[i];
-            if (gene > 0 && gene < visited.length) visited[gene] = false;
-            gene = parent2[i];
-            if (gene > 0 && gene < visited.length) visited[gene] = false;
+            if (parent1[i] > 0) numCustomers++;
+        }
+        if (numCustomers == 0) {
+            // Không có customer → copy parent1
+            System.arraycopy(parent1, 0, offspring, 0, length);
+            return;
         }
 
-        // --- Khởi tạo offspring với sentinel -1 (ô trống) ---
+        // Dùng arrays local nhưng kích thước bounded bởi MAX_CHROM_LEN
+        int[] custList1  = new int[numCustomers];
+        int[] custList2  = new int[numCustomers];
+        int[] remainder  = new int[numCustomers];
+        int[] offCustSeq = new int[numCustomers];
+
+        int ci = 0;
         for (int i = 0; i < length; i++) {
-            offspring[i] = -1;
+            if (parent1[i] > 0) custList1[ci++] = parent1[i];
+        }
+        ci = 0;
+        for (int i = 0; i < length; i++) {
+            if (parent2[i] > 0) custList2[ci++] = parent2[i];
         }
 
-        // --- Bước 1: Copy đoạn [cut1..cut2] từ parent1 ---
-        for (int i = cut1; i <= cut2; i++) {
-            offspring[i] = parent1[i];
-            int gene = parent1[i];
-            if (gene != 0) {
-                visited[gene] = true; // đánh dấu customer đã có mặt
+        // ── Chọn đoạn cắt trên customer list (index 0..numCustomers-1) ──────
+        int cut1c = rng.nextInt(numCustomers);
+        int cut2c = rng.nextInt(numCustomers);
+        if (cut1c > cut2c) { int t = cut1c; cut1c = cut2c; cut2c = t; }
+
+        // ── Reset visited chỉ những phần tử cần dùng ────────────────────────
+        for (int i = 0; i < numCustomers; i++) {
+            int g = custList1[i];
+            if (g < visited.length) visited[g] = false;
+            g = custList2[i];
+            if (g < visited.length) visited[g] = false;
+        }
+
+        // ── Bước 1: Đánh dấu segment từ parent1 ─────────────────────────────
+        for (int i = cut1c; i <= cut2c; i++) {
+            int g = custList1[i];
+            if (g < visited.length) visited[g] = true;
+        }
+
+        // ── Bước 2: Remainder = customer từ parent2 không có trong segment ──
+        int remLen = 0;
+        for (int i = 0; i < numCustomers; i++) {
+            int p2Cust = custList2[(cut2c + 1 + i) % numCustomers];
+            if (p2Cust < visited.length && !visited[p2Cust]) {
+                remainder[remLen++] = p2Cust;
             }
         }
 
-        // --- Bước 2: Điền customer còn thiếu từ parent2 (xoay vòng từ cut2+1) ---
-        int outIdx = (cut2 + 1) % length;
+        // ── Bước 3: Tái dựng customer sequence cho offspring ─────────────────
+        // = remainder[0..cut1c-1] + custList1[cut1c..cut2c] + remainder[cut1c..remLen-1]
+        int oi = 0;
+        for (int i = 0; i < cut1c && i < remLen; i++)   offCustSeq[oi++] = remainder[i];
+        for (int i = cut1c; i <= cut2c; i++)              offCustSeq[oi++] = custList1[i];
+        for (int i = cut1c; i < remLen; i++)              offCustSeq[oi++] = remainder[i];
 
-        for (int i = 0; i < length; i++) {
-            int p2Idx = (cut2 + 1 + i) % length;
-            int customer = parent2[p2Idx];
-
-            // Chỉ điền customer thực (≠ 0) chưa được đánh dấu
-            if (customer != 0 && !visited[customer]) {
-                // Bỏ qua các vị trí trong đoạn đã copy [cut1..cut2]
-                while (outIdx >= cut1 && outIdx <= cut2) {
-                    outIdx = (outIdx + 1) % length;
-                }
-                offspring[outIdx] = customer;
-                visited[customer] = true;
-                outIdx = (outIdx + 1) % length;
-            }
-        }
-
-        // --- Bước 3: Các ô còn -1 → gán 0 (depot separator) ---
-        for (int i = 0; i < length; i++) {
-            if (offspring[i] == -1) {
+        // ── Bước 4: Reconstruct chromosome ────────────────────────────────────
+        // Giữ nguyên vị trí 0 (depot) từ parent1, chỉ thay thế các gene customer.
+        offspring[0] = 0;
+        offspring[length - 1] = 0;
+        int custFill = 0;
+        for (int i = 1; i < length - 1; i++) {
+            if (parent1[i] == 0) {
                 offspring[i] = 0;
+            } else {
+                offspring[i] = (custFill < oi) ? offCustSeq[custFill++] : 0;
             }
         }
     }

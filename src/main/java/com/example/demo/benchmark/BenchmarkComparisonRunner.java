@@ -197,7 +197,26 @@ public class BenchmarkComparisonRunner {
             }
         }
 
-        return new ProblemContext(n, inst.maxVehicles(), inst.capacity(), cost, inst.demands());
+        // ── Validation: đảm bảo demands được nạp đúng (phát hiện sớm lỗi pipeline) ──
+        double demandSum = 0.0;
+        double[] demands = inst.demands();
+        for (double d : demands) demandSum += d;
+        if (demandSum <= 0.0) {
+            log.warn("[VALIDATION] Instance '{}': tổng demands = 0! Demands có thể chưa được parse đúng. " +
+                     "GA sẽ không enforce capacity constraint và cho kết quả không hợp lệ.",
+                     inst.instanceName());
+        }
+        if (demands.length != n + 1) {
+            throw new IllegalStateException(String.format(
+                "Instance '%s': demands.length=%d nhưng expected %d (n+1).",
+                inst.instanceName(), demands.length, n + 1));
+        }
+
+        log.debug("buildContext '{}': N={}, K={}, C={}, demandSum={}, chromLen={}",
+                inst.instanceName(), n, inst.maxVehicles(), inst.capacity(),
+                demandSum, n + inst.maxVehicles() + 1);
+
+        return new ProblemContext(n, inst.maxVehicles(), inst.capacity(), cost, demands);
     }
 
     private int countVehiclesUsed(int[] chr, int len) {
